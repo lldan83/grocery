@@ -1,0 +1,169 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>임직원 할인율 노트</title>
+<style>
+:root{--bg:#f7f6f3;--card:#fff;--tx:#1f1f1d;--tx2:#6b6a66;--bd:#e3e1db;--ac:#185fa5;--acbg:#e6f1fb;--warn:#fff3d6;--warntx:#7a4b00;--ok:#e6f4ea;--oktx:#1e6b34}
+@media(prefers-color-scheme:dark){:root{--bg:#1c1c1a;--card:#262624;--tx:#eeede8;--tx2:#a5a49e;--bd:#3a3a37;--ac:#85b7eb;--acbg:#1d3550;--warn:#4a3a14;--warntx:#f5d58a;--ok:#1d3a27;--oktx:#9be0b0}}
+*{box-sizing:border-box}
+body{margin:0;background:var(--bg);color:var(--tx);font:15px/1.5 -apple-system,"Apple SD Gothic Neo","Noto Sans KR",sans-serif;padding:12px;padding-top:max(12px,env(safe-area-inset-top));max-width:560px;margin:0 auto}
+input,select,button{font:inherit;color:var(--tx);background:var(--card);border:1px solid var(--bd);border-radius:8px;padding:8px 10px;min-width:0}
+button{cursor:pointer}button.p{background:var(--ac);color:var(--card);border-color:var(--ac)}
+button.l{border:none;background:none;color:var(--tx2);padding:4px 6px;font-size:13px}
+#q{width:100%;font-size:17px;padding:12px}
+.card{background:var(--card);border:1px solid var(--bd);border-radius:12px;padding:12px 14px;margin-top:10px}
+.top{display:flex;justify-content:space-between;align-items:center;cursor:pointer;gap:8px}
+.nm{font-weight:500}.sub{font-size:12px;color:var(--tx2)}
+.rate{font-size:26px;font-weight:600;color:var(--ac);text-align:right;line-height:1}
+.rate small{display:block;font-size:11px;font-weight:400;color:var(--tx2);margin-top:3px}
+.hist{border-top:1px solid var(--bd);margin-top:10px;padding-top:4px;font-size:13px}
+.h{display:flex;gap:6px;align-items:center;padding:5px 0;flex-wrap:wrap}.h .d{color:var(--tx2);width:46px}.h .m{flex:1;min-width:120px}
+.row{display:grid;grid-template-columns:1fr 62px 84px 74px;gap:6px;margin-top:6px}
+.tag{font-size:12px;padding:2px 8px;border-radius:8px;background:var(--acbg);color:var(--ac)}
+.warn{background:var(--warn);color:var(--warntx);padding:8px 10px;border-radius:8px;font-size:13px;margin-top:8px}
+.cand{display:block;width:100%;text-align:left;margin-top:6px;font-size:13px}
+.f{display:flex;gap:6px;margin-top:6px}.f>*{flex:1}
+#msg{font-size:13px;color:var(--tx2);margin-top:8px;min-height:18px}
+h3{margin:0 0 4px;font-size:16px}
+</style>
+</head>
+<body>
+<div style="display:flex;gap:8px;align-items:center">
+<input id="q" type="search" placeholder="품목 검색 (예: 로션)" autocomplete="off">
+</div>
+<div id="bar" style="margin-top:8px"></div>
+<div id="form"></div>
+<div id="list"></div>
+<div id="msg"></div>
+<div style="text-align:center;margin-top:18px"><button class="l" id="lg"></button></div>
+<div id="lgbox"></div>
+<datalist id="dn"></datalist><datalist id="ds"></datalist>
+
+<script>
+const KEY="AIzaSyBMdrK4CS55QeTHPXsrERPhzSlF272wCTI",PID="grocery-discount";
+const DB=`https://firestore.googleapis.com/v1/projects/${PID}/databases/(default)/documents/purchases`;
+let items=[],tok=null,tokExp=0,owner=false,editId=null,cand=[];
+const $=s=>document.querySelector(s),r10=x=>Math.round(x/10)*10,paidOf=(p,r)=>p-r10(p*r/100);
+const won=n=>Number(n).toLocaleString("ko-KR"),esc=s=>String(s).replace(/[&<>"]/g,c=>({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;"}[c]));
+const msg=t=>$("#msg").textContent=t||"";
+const today=()=>{const d=new Date();return new Date(d-d.getTimezoneOffset()*6e4).toISOString().slice(0,10)};
+const gv=f=>f?(f.stringValue!==undefined?f.stringValue:f.integerValue!==undefined?+f.integerValue:f.doubleValue):"";
+const key=s=>s.trim().toLowerCase();
+
+async function load(){
+  let all=[],pt="";
+  do{
+    const r=await fetch(`${DB}?pageSize=300&key=${KEY}${pt?"&pageToken="+pt:""}`),j=await r.json();
+    if(j.error)throw new Error(j.error.message);
+    (j.documents||[]).forEach(d=>{const f=d.fields||{};all.push({id:d.name.split("/").pop(),date:gv(f.date),store:gv(f.store),name:gv(f.name),qty:gv(f.qty),price:gv(f.price),rate:gv(f.rate)})});
+    pt=j.nextPageToken||"";
+  }while(pt);
+  items=all;render();
+}
+async function auth(){
+  if(tok&&Date.now()<tokExp-6e4)return tok;
+  const rt=localStorage.getItem("rt");if(!rt)return null;
+  const r=await fetch(`https://securetoken.googleapis.com/v1/token?key=${KEY}`,{method:"POST",headers:{"Content-Type":"application/x-www-form-urlencoded"},body:`grant_type=refresh_token&refresh_token=${rt}`}),j=await r.json();
+  if(!j.id_token){localStorage.removeItem("rt");return null}
+  tok=j.id_token;tokExp=Date.now()+j.expires_in*1000;localStorage.setItem("rt",j.refresh_token);return tok;
+}
+async function login(){
+  const r=await fetch(`https://identitytoolkit.googleapis.com/v1/accounts:signInWithPassword?key=${KEY}`,{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({email:$("#em").value,password:$("#pw").value,returnSecureToken:true})}),j=await r.json();
+  if(!j.idToken){msg("로그인에 실패했어요. 이메일과 비밀번호를 확인하세요.");return}
+  tok=j.idToken;tokExp=Date.now()+j.expiresIn*1000;localStorage.setItem("rt",j.refreshToken);owner=true;$("#lgbox").innerHTML="";msg("");render();
+}
+async function api(method,id,body){
+  const t=await auth();if(!t)throw new Error("로그인이 필요해요");
+  const r=await fetch(DB+(id?"/"+id:"")+`?key=${KEY}`,{method,headers:{Authorization:"Bearer "+t,"Content-Type":"application/json"},body:body?JSON.stringify(body):undefined});
+  const j=await r.json().catch(()=>({}));if(j.error)throw new Error(j.error.message);return j;
+}
+const enc=o=>({fields:{date:{stringValue:o.date},store:{stringValue:o.store},name:{stringValue:o.name},qty:{stringValue:o.qty},price:{integerValue:String(o.price)},rate:{doubleValue:o.rate}}});
+
+function known(name){
+  const a=items.filter(i=>key(i.name)===key(name)).sort((x,y)=>y.date.localeCompare(x.date));
+  return a.length?a[0].rate:null;
+}
+function render(){
+  $("#lg").textContent=owner?"로그아웃":"편집 로그인";
+  $("#bar").innerHTML=owner&&!$("#form").innerHTML?`<button class="p" onclick="openForm()" style="width:100%">+ 기록 추가</button>`:"";
+  $("#dn").innerHTML=[...new Set(items.map(i=>i.name))].map(n=>`<option value="${esc(n)}">`).join("");
+  $("#ds").innerHTML=[...new Set(items.map(i=>i.store).filter(Boolean))].map(n=>`<option value="${esc(n)}">`).join("");
+  const q=key($("#q").value),g={};
+  items.forEach(i=>{(g[key(i.name)]=g[key(i.name)]||[]).push(i)});
+  const gs=Object.values(g).map(a=>a.sort((x,y)=>y.date.localeCompare(x.date))).filter(a=>!q||key(a[0].name).includes(q)).sort((x,y)=>y[0].date.localeCompare(x[0].date));
+  const openKeys=render.o=render.o||new Set();
+  $("#list").innerHTML=gs.length?gs.map(a=>{
+    const k=key(a[0].name),mix=new Set(a.map(i=>i.rate)).size>1,op=openKeys.has(k)||(q&&gs.length<=2);
+    return `<div class="card"><div class="top" onclick="tg('${esc(k).replace(/'/g,"\\'")}')"><div><div class="nm">${esc(a[0].name)}</div><div class="sub">기록 ${a.length}회 · 마지막 ${a[0].date.slice(5).replace("-","/")}${a[0].store?" · "+esc(a[0].store):""}</div></div><div class="rate">${a[0].rate}%<small>${mix?"할인율 섞임":"임직원 할인"}</small></div></div>`+
+    (op?`<div class="hist">${a.map(i=>`<div class="h"><span class="d">${i.date.slice(2)}</span><span class="m">${esc(i.store||"-")}${i.qty?" · "+esc(i.qty):""}<br>${won(i.price)} → ${won(paidOf(i.price,i.rate))}</span><span class="tag">${i.rate}%</span>${owner?`<button class="l" onclick="ed('${i.id}')">수정</button><button class="l" onclick="del('${i.id}')">삭제</button>`:""}</div>`).join("")}</div>`:"")+`</div>`;
+  }).join(""):`<div class="sub" style="margin-top:16px;text-align:center">${items.length?"검색 결과가 없어요.":"아직 기록이 없어요."}</div>`;
+}
+function tg(k){const s=render.o;s.has(k)?s.delete(k):s.add(k);render()}
+
+function rowHtml(r={}){
+  return `<div class="row"><input class="n" list="dn" placeholder="품목" value="${esc(r.name||"")}" oninput="hint(this)"><input class="u" placeholder="수량" value="${esc(r.qty||"")}"><input class="p" type="number" inputmode="numeric" placeholder="판매가" value="${r.price||""}"><select class="r"><option value="">자동</option><option ${r.rate==5?"selected":""} value="5">5%</option><option ${r.rate==10?"selected":""} value="10">10%</option></select><div class="sub k" style="grid-column:1/-1"></div></div>`;
+}
+function hint(el){
+  const k=known(el.value),box=el.parentNode.querySelector(".k");
+  box.textContent=k!=null?`기록된 할인율 ${k}% 자동 적용`:"";
+}
+function openForm(r){
+  const e=r||{};editId=r?r.id:null;cand=[];
+  $("#form").innerHTML=`<div class="card"><h3>${r?"기록 수정":"영수증 기록"}</h3>
+  <div class="f"><input id="fd" type="date" value="${e.date||today()}"><input id="fs" list="ds" placeholder="구매처" value="${esc(e.store||"")}"></div>
+  <div id="rows">${rowHtml(e.name?e:{})}</div>
+  ${r?"":`<button class="l" onclick="$('#rows').insertAdjacentHTML('beforeend',rowHtml())">+ 품목 추가</button>
+  <div class="f"><input id="tot" type="number" inputmode="numeric" placeholder="영수증 전체 할인액"><button onclick="solve()">할인율 역산</button></div>`}
+  <div id="cd"></div>
+  <div class="f" style="margin-top:10px"><button onclick="closeForm()">취소</button><button class="p" onclick="save()">저장</button></div></div>`;
+  $("#bar").innerHTML="";document.querySelectorAll("#rows .n").forEach(hint);$("#form").scrollIntoView();
+}
+function closeForm(){$("#form").innerHTML="";editId=null;render()}
+function readRows(){
+  return [...document.querySelectorAll("#rows .row")].map(el=>({el,name:el.querySelector(".n").value.trim(),qty:el.querySelector(".u").value.trim(),price:+el.querySelector(".p").value,sel:el.querySelector(".r").value})).filter(r=>r.name||r.price);
+}
+function rateOf(r){return r.sel?+r.sel:known(r.name)}
+function solve(){
+  const tot=+$("#tot").value,R=readRows().filter(r=>r.name&&r.price);
+  if(!tot||!R.length){$("#cd").innerHTML=`<div class="warn">품목 판매가와 전체 할인액을 먼저 입력하세요.</div>`;return}
+  let fixed=0;const U=[];
+  R.forEach(r=>{const x=rateOf(r);x!=null?fixed+=r10(r.price*x/100):U.push(r)});
+  if(U.length>18){$("#cd").innerHTML=`<div class="warn">할인율을 모르는 품목이 너무 많아요. 일부는 직접 선택해 주세요.</div>`;return}
+  const res=[];
+  for(let m=0;m<(1<<U.length);m++){
+    let s=fixed;U.forEach((r,i)=>s+=r10(r.price*((m>>i&1)?10:5)/100));
+    if(Math.abs(s-tot)<=10)res.push({m,d:Math.abs(s-tot)});
+  }
+  res.sort((a,b)=>a.d-b.d);cand=res.slice(0,3).map(c=>U.map((r,i)=>[r,(c.m>>i&1)?10:5]));
+  $("#cd").innerHTML=!U.length?`<div class="warn">모든 품목의 할인율이 이미 정해져 있어요.</div>`:
+    res.length?`<div class="sub" style="margin-top:8px">가능한 조합 ${res.length}개${res.length>3?" (상위 3개)":""}. 눌러서 적용하세요.</div>`+cand.map((c,i)=>`<button class="cand" onclick="apply(${i})">${c.map(([r,x])=>esc(r.name)+" "+x+"%").join(", ")}</button>`).join(""):
+    `<div class="warn">맞는 조합이 없어요. 금액이나 품목을 다시 확인하세요.</div>`;
+}
+function apply(i){cand[i].forEach(([r,x])=>r.el.querySelector(".r").value=String(x));msg("적용했어요. 확인 후 저장하세요.")}
+async function save(){
+  try{
+    const date=$("#fd").value,store=$("#fs").value.trim(),R=readRows();
+    if(!date||!R.length)return msg("날짜와 품목을 입력하세요.");
+    for(const r of R)if(!r.name||!r.price||rateOf(r)==null)return msg(`"${r.name||"(품목명 없음)"}"의 할인율을 선택하거나 역산하세요.`);
+    msg("저장 중…");
+    for(const r of R){const o={date,store,name:r.name,qty:r.qty,price:r.price,rate:rateOf(r)};editId?await api("PATCH",editId,enc(o)):await api("POST","",enc(o))}
+    closeForm();await load();msg("저장했어요.");
+  }catch(e){msg("저장 실패: "+e.message)}
+}
+function ed(id){openForm(items.find(i=>i.id===id))}
+async function del(id){if(!confirm("이 기록을 삭제할까요?"))return;try{await api("DELETE",id);await load()}catch(e){msg("삭제 실패: "+e.message)}}
+
+$("#q").oninput=render;
+$("#lg").onclick=()=>{
+  if(owner){localStorage.removeItem("rt");tok=null;owner=false;closeForm();return}
+  $("#lgbox").innerHTML=`<div class="card"><div class="f"><input id="em" type="email" placeholder="이메일"><input id="pw" type="password" placeholder="비밀번호"></div><button class="p" style="width:100%;margin-top:8px" onclick="login()">로그인</button></div>`;
+};
+(async()=>{
+  try{owner=!!(await auth())}catch(e){}
+  try{await load()}catch(e){msg("불러오기 실패: "+e.message);render()}
+})();
+</script>
+</body>
+</html>
