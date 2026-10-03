@@ -58,7 +58,7 @@ h3{margin:0;font-size:15px;font-weight:500}
 <script>
 const KEY="AIzaSyBMdrK4CS55QeTHPXsrERPhzSlF272wCTI",PID="grocery-discount";
 const DB=`https://firestore.googleapis.com/v1/projects/${PID}/databases/(default)/documents/receipts`;
-let rcps=[],tok=null,tokExp=0,owner=false,editId=null,det0=[],Q=[],pend=null;
+let rcps=[],tok=null,tokExp=0,owner=false,editId=null,det0=[],Q=[],UL=[],pend=null;
 const $=s=>document.querySelector(s),r10=x=>Math.round(x/10)*10,paidOf=(p,r)=>p-r10(p*r/100);
 const won=n=>Number(n).toLocaleString("ko-KR"),esc=s=>String(s).replace(/[&<>"]/g,c=>({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;"}[c]));
 const msg=t=>$("#msg").textContent=t||"";
@@ -219,7 +219,10 @@ function solve(){
   det0=R.filter(r=>r.grp in det&&!known.has(r.grp)).map(r=>[r,det[r.grp]]);
   const un=R.filter(r=>und.has(r.grp)&&!known.has(r.grp));
   let h="";
-  if(bad.length)h+=`<div class="warn">이 영수증과 기존 기록이 안 맞아요 (관련: ${[...new Set(bad.map(b=>b.date))].join(", ")}). 할인액을 확인하거나 행사 기준(전/후)을 바꿔 보세요. 저장은 가능해요.</div>`;
+  if(bad.length){
+    const sp=suspects(recs,G,R);UL=[];
+    h+=`<div class="warn"><b>기존 기록과 안 맞아요.</b> `+(sp.length?`원인 후보:`+sp.map(x=>{const rows=R.filter(r=>r.grp===x.g);rows.filter(r=>r.grp!==key(r.name)).forEach(r=>UL.push(r));return `<br>· ${esc(rows[0].name)}: 현재 ${x.old}%인데 이번 영수증은 ${x.need!=null?x.need+"%":"다른 할인율"}이어야 맞아요`}).join("")+`<br>같은 품목이 아니라면 묶음을 해제해 보세요.`:`원인을 하나로 좁히지 못했어요. 전체 할인액이나 행사 기준(전/후)을 확인하세요. (관련: ${[...new Set(bad.map(b=>b.date))].join(", ")})`)+`</div>`+UL.map((r,i)=>`<button class="cand" onclick="unlink(${i})">"${esc(r.name)}" 묶음 해제</button>`).join("");
+  }
   if(det0.length)h+=`<div class="warn" style="background:var(--ok);color:var(--oktx)">확정: ${det0.map(([r,x])=>esc(r.name)+" "+x+"%").join(", ")}</div>`;
   if(un.length)h+=`<div class="warn">미정: ${un.map(r=>esc(r.name)+(stat[r.grp]?` (10% ${stat[r.grp][0]}/${stat[r.grp][1]})`:"")).join(", ")}<br>미확정으로 저장되고, 나중에 확정되면 자동으로 채워져요. 아는 품목은 직접 눌러도 돼요.</div>`;
   if(loose)h+=`<div class="sub">정확히 맞는 조합이 없어 10원 오차까지 포함했어요.</div>`;
@@ -228,6 +231,16 @@ function solve(){
   if(!h)h=`<div class="warn">모든 품목의 할인율이 이미 정해져 있어요.</div>`;
   $("#cd").innerHTML=h+(det0.length?`<button class="cand" onclick="apply()">확정분 적용</button>`:"");
 }
+function suspects(recs,G,R){
+  const out=[];
+  [...new Set(R.map(r=>r.grp))].filter(g=>g in G).forEach(g=>{
+    const G2={...G};delete G2[g];
+    const x=sysSolve(recs,G2);
+    if(!x.bad.length)out.push({g,old:G[g],need:x.det[g]});
+  });
+  return out;
+}
+function unlink(i){const r=UL[i];r.el.dataset.grp=key(r.name);msg("묶음을 해제하고 다시 역산했어요.");solve()}
 function apply(){det0.forEach(([r,x])=>setR(r.el.querySelector(`.sg button[data-v="${x}"]`)));msg("확정분을 적용했어요.")}
 async function save(){
   try{
