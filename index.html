@@ -34,6 +34,7 @@ h3{margin:0 0 4px;font-size:16px}
 <input id="q" type="search" placeholder="품목 검색 (예: 로션)" autocomplete="off">
 </div>
 <div id="bar" style="margin-top:8px"></div>
+<div id="pd"></div>
 <div id="form"></div>
 <div id="list"></div>
 <div id="msg"></div>
@@ -43,24 +44,68 @@ h3{margin:0 0 4px;font-size:16px}
 
 <script>
 const KEY="AIzaSyBMdrK4CS55QeTHPXsrERPhzSlF272wCTI",PID="grocery-discount";
-const DB=`https://firestore.googleapis.com/v1/projects/${PID}/databases/(default)/documents/purchases`;
-let items=[],tok=null,tokExp=0,owner=false,editId=null,cand=[];
+const DB=`https://firestore.googleapis.com/v1/projects/${PID}/databases/(default)/documents/receipts`;
+let rcps=[],tok=null,tokExp=0,owner=false,editId=null,det0=[],Q=[],pend=null;
 const $=s=>document.querySelector(s),r10=x=>Math.round(x/10)*10,paidOf=(p,r)=>p-r10(p*r/100);
 const won=n=>Number(n).toLocaleString("ko-KR"),esc=s=>String(s).replace(/[&<>"]/g,c=>({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;"}[c]));
 const msg=t=>$("#msg").textContent=t||"";
 const today=()=>{const d=new Date();return new Date(d-d.getTimezoneOffset()*6e4).toISOString().slice(0,10)};
-const gv=f=>f?(f.stringValue!==undefined?f.stringValue:f.integerValue!==undefined?+f.integerValue:f.doubleValue):"";
+const gv=f=>!f?"":f.nullValue!==undefined?null:f.stringValue!==undefined?f.stringValue:f.integerValue!==undefined?+f.integerValue:f.doubleValue;
 const key=s=>s.trim().toLowerCase();
+const STOP=new Set(["국산","유기농","냉동","냉장","무농약","친환경","수입","행사"]);
+const toks=n=>n.toLowerCase().replace(/[0-9.]+\s*(입|개|ml|l|kg|g|팩|봉|ea|구|단|병|캔)?/gi," ").replace(/[^\p{L}\s]/gu," ").split(/\s+/).filter(t=>t.length>=2&&!STOP.has(t));
+const ov=(a,b)=>a.some(x=>b.some(y=>x==y||x.includes(y)||y.includes(x)));
+
+function sysSolve(recs,G){
+  const det={},und=new Set(),bad=[],rs=recs.filter(r=>r.total!=null);
+  const rv=r=>[...new Set(r.items.map(i=>i.grp).filter(g=>!(g in G)))];
+  const sum=(r,m)=>r.items.reduce((s,i)=>s+r10(i.price*(i.grp in G?G[i.grp]:m[i.grp])/100),0);
+  rs.filter(r=>!rv(r).length).forEach(r=>{if(Math.abs(sum(r,{})-r.total)>10)bad.push(r)});
+  const comps=[];
+  rs.filter(r=>rv(r).length).forEach(r=>{
+    const vs=rv(r),hit=comps.filter(c=>vs.some(v=>c.v.has(v))),c={v:new Set(vs),r:[r]};
+    hit.forEach(h=>{h.v.forEach(v=>c.v.add(v));c.r.push(...h.r);comps.splice(comps.indexOf(h),1)});
+    comps.push(c);
+  });
+  comps.forEach(c=>{
+    const V=[...c.v];
+    if(V.length>18){V.forEach(v=>und.add(v));return}
+    const sol=[];
+    for(let m=0;m<(1<<V.length);m++){
+      const a={};V.forEach((v,i)=>a[v]=(m>>i&1)?10:5);
+      if(c.r.every(r=>Math.abs(sum(r,a)-r.total)<=10))sol.push(a);
+    }
+    if(!sol.length){V.forEach(v=>und.add(v));c.r.forEach(r=>bad.push(r));return}
+    V.forEach(v=>{const s=new Set(sol.map(a=>a[v]));s.size==1?det[v]=[...s][0]:und.add(v)});
+  });
+  return {det,und,bad};
+}
+const flat=()=>rcps.flatMap(r=>r.items.map(i=>({...i,date:r.date,store:r.store,rid:r.id})));
+const grMap=ex=>{const g={};[...rcps].filter(r=>r.id!==ex).sort((a,b)=>a.date.localeCompare(b.date)).forEach(r=>r.items.forEach(i=>{if(i.rate!=null)g[i.grp]=i.rate}));return g};
+const exactGrp=n=>{const x=flat().find(i=>key(i.name)===key(n));return x&&x.grp};
+const gname=g=>flat().filter(i=>i.grp===g).reduce((m,i)=>i.name.length<m.length?i.name:m,"~".repeat(99));
+
+const dec=d=>{const f=d.fields||{};return{id:d.name.split("/").pop(),date:gv(f.date),store:gv(f.store),total:f.total?gv(f.total):null,items:((f.items&&f.items.arrayValue.values)||[]).map(v=>{const g=v.mapValue.fields;return{name:gv(g.name),qty:gv(g.qty),price:gv(g.price),rate:gv(g.rate),grp:gv(g.grp)}})}};
+const enc=o=>({fields:{date:{stringValue:o.date},store:{stringValue:o.store},total:o.total==null?{nullValue:null}:{integerValue:String(o.total)},items:{arrayValue:{values:o.items.map(i=>({mapValue:{fields:{name:{stringValue:i.name},qty:{stringValue:i.qty},price:{integerValue:String(i.price)},rate:i.rate==null?{nullValue:null}:{doubleValue:i.rate},grp:{stringValue:i.grp}}}}))}}}});
 
 async function load(){
   let all=[],pt="";
   do{
     const r=await fetch(`${DB}?pageSize=300&key=${KEY}${pt?"&pageToken="+pt:""}`),j=await r.json();
     if(j.error)throw new Error(j.error.message);
-    (j.documents||[]).forEach(d=>{const f=d.fields||{};all.push({id:d.name.split("/").pop(),date:gv(f.date),store:gv(f.store),name:gv(f.name),qty:gv(f.qty),price:gv(f.price),rate:gv(f.rate)})});
-    pt=j.nextPageToken||"";
+    (j.documents||[]).forEach(d=>all.push(dec(d)));pt=j.nextPageToken||"";
   }while(pt);
-  items=all;render();
+  rcps=all;render();await resolveAll();
+}
+async function resolveAll(){
+  if(!owner)return;
+  const gr=grMap(null),{det}=sysSolve(rcps.map(r=>({date:r.date,total:r.total,items:r.items})),gr);let n=0;
+  try{
+    for(const r of rcps){let ch=false;
+      r.items.forEach(i=>{if(i.rate==null){const v=i.grp in gr?gr[i.grp]:det[i.grp];if(v!=null){i.rate=v;ch=true}}});
+      if(ch){await api("PATCH",r.id,enc(r));n++}}
+  }catch(e){msg("자동 확정 실패: "+e.message);return}
+  if(n){msg(`미확정이던 영수증 ${n}건의 할인율을 확정했어요.`);render()}
 }
 async function auth(){
   if(tok&&Date.now()<tokExp-6e4)return tok;
@@ -72,88 +117,105 @@ async function auth(){
 async function login(){
   const r=await fetch(`https://identitytoolkit.googleapis.com/v1/accounts:signInWithPassword?key=${KEY}`,{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({email:$("#em").value,password:$("#pw").value,returnSecureToken:true})}),j=await r.json();
   if(!j.idToken){msg("로그인에 실패했어요. 이메일과 비밀번호를 확인하세요.");return}
-  tok=j.idToken;tokExp=Date.now()+j.expiresIn*1000;localStorage.setItem("rt",j.refreshToken);owner=true;$("#lgbox").innerHTML="";msg("");render();
+  tok=j.idToken;tokExp=Date.now()+j.expiresIn*1000;localStorage.setItem("rt",j.refreshToken);owner=true;$("#lgbox").innerHTML="";msg("");render();resolveAll();
 }
 async function api(method,id,body){
   const t=await auth();if(!t)throw new Error("로그인이 필요해요");
   const r=await fetch(DB+(id?"/"+id:"")+`?key=${KEY}`,{method,headers:{Authorization:"Bearer "+t,"Content-Type":"application/json"},body:body?JSON.stringify(body):undefined});
   const j=await r.json().catch(()=>({}));if(j.error)throw new Error(j.error.message);return j;
 }
-const enc=o=>({fields:{date:{stringValue:o.date},store:{stringValue:o.store},name:{stringValue:o.name},qty:{stringValue:o.qty},price:{integerValue:String(o.price)},rate:{doubleValue:o.rate}}});
 
-function known(name){
-  const a=items.filter(i=>key(i.name)===key(name)).sort((x,y)=>y.date.localeCompare(x.date));
-  return a.length?a[0].rate:null;
-}
 function render(){
   $("#lg").textContent=owner?"로그아웃":"편집 로그인";
-  $("#bar").innerHTML=owner&&!$("#form").innerHTML?`<button class="p" onclick="openForm()" style="width:100%">+ 기록 추가</button>`:"";
-  $("#dn").innerHTML=[...new Set(items.map(i=>i.name))].map(n=>`<option value="${esc(n)}">`).join("");
-  $("#ds").innerHTML=[...new Set(items.map(i=>i.store).filter(Boolean))].map(n=>`<option value="${esc(n)}">`).join("");
-  const q=key($("#q").value),g={};
-  items.forEach(i=>{(g[key(i.name)]=g[key(i.name)]||[]).push(i)});
-  const gs=Object.values(g).map(a=>a.sort((x,y)=>y.date.localeCompare(x.date))).filter(a=>!q||key(a[0].name).includes(q)).sort((x,y)=>y[0].date.localeCompare(x[0].date));
-  const openKeys=render.o=render.o||new Set();
-  $("#list").innerHTML=gs.length?gs.map(a=>{
-    const k=key(a[0].name),mix=new Set(a.map(i=>i.rate)).size>1,op=openKeys.has(k)||(q&&gs.length<=2);
-    return `<div class="card"><div class="top" onclick="tg('${esc(k).replace(/'/g,"\\'")}')"><div><div class="nm">${esc(a[0].name)}</div><div class="sub">기록 ${a.length}회 · 마지막 ${a[0].date.slice(5).replace("-","/")}${a[0].store?" · "+esc(a[0].store):""}</div></div><div class="rate">${a[0].rate}%<small>${mix?"할인율 섞임":"임직원 할인"}</small></div></div>`+
-    (op?`<div class="hist">${a.map(i=>`<div class="h"><span class="d">${i.date.slice(2)}</span><span class="m">${esc(i.store||"-")}${i.qty?" · "+esc(i.qty):""}<br>${won(i.price)} → ${won(paidOf(i.price,i.rate))}</span><span class="tag">${i.rate}%</span>${owner?`<button class="l" onclick="ed('${i.id}')">수정</button><button class="l" onclick="del('${i.id}')">삭제</button>`:""}</div>`).join("")}</div>`:"")+`</div>`;
-  }).join(""):`<div class="sub" style="margin-top:16px;text-align:center">${items.length?"검색 결과가 없어요.":"아직 기록이 없어요."}</div>`;
+  $("#bar").innerHTML=owner&&!$("#form").innerHTML?`<button class="p" onclick="openForm()" style="width:100%">+ 영수증 기록</button>`:"";
+  const fl=flat();
+  $("#dn").innerHTML=[...new Set(fl.map(i=>i.name))].map(n=>`<option value="${esc(n)}">`).join("");
+  $("#ds").innerHTML=[...new Set(fl.map(i=>i.store).filter(Boolean))].map(n=>`<option value="${esc(n)}">`).join("");
+  const q=key($("#q").value),pr=rcps.filter(r=>r.items.some(i=>i.rate==null));
+  $("#pd").innerHTML=pr.length&&!q?`<div class="card"><div class="nm">미확정 ${pr.length}건</div>`+pr.map(r=>`<div class="h"${owner?` style="cursor:pointer" onclick="ed('${r.id}')"`:""}><span class="d">${r.date.slice(5).replace("-","/")}</span><span class="m">${esc(r.store||"-")} · ${r.items.filter(i=>i.rate==null).map(i=>esc(i.name)).join(", ")}</span></div>`).join("")+`<div class="sub">비슷한 품목이 있는 새 영수증이 들어오면 함께 계산해요.</div></div>`:"";
+  const g={};fl.forEach(i=>(g[i.grp]=g[i.grp]||[]).push(i));
+  const gs=Object.values(g).map(a=>a.sort((x,y)=>y.date.localeCompare(x.date))).filter(a=>!q||a.some(i=>key(i.name).includes(q))).sort((x,y)=>y[0].date.localeCompare(x[0].date));
+  render.gl=gs.map(a=>a[0].grp);const O=render.o=render.o||new Set();
+  $("#list").innerHTML=gs.length?gs.map((a,n)=>{
+    const c=a.find(i=>i.rate!=null),cr=c?c.rate:null,names=new Set(a.map(i=>key(i.name))),mix=new Set(a.filter(i=>i.rate!=null).map(i=>i.rate)).size>1;
+    const op=O.has(a[0].grp)||(q&&gs.length<=2),title=a.reduce((m,i)=>i.name.length<m.length?i.name:m,a[0].name);
+    return `<div class="card"><div class="top" onclick="tg(${n})"><div><div class="nm">${esc(title)}</div><div class="sub">기록 ${a.length}회${names.size>1?" · 이름 "+names.size+"개 묶음":""} · 마지막 ${a[0].date.slice(5).replace("-","/")}</div></div><div class="rate">${cr!=null?cr+"%":"?"}<small>${cr==null?"미확정":mix?"할인율 섞임":"임직원 할인"}</small></div></div>`+
+    (op?`<div class="hist">${a.map(i=>`<div class="h"><span class="d">${i.date.slice(2)}</span><span class="m">${esc(i.name)}${i.qty?" · "+esc(i.qty):""} · ${esc(i.store||"-")}<br>${i.rate!=null?won(i.price)+" → "+won(paidOf(i.price,i.rate)):won(i.price)}</span><span class="tag">${i.rate!=null?i.rate+"%":"미확정"}</span>${owner?`<button class="l" onclick="ed('${i.rid}')">영수증 수정</button>`:""}</div>`).join("")}</div>`:"")+`</div>`;
+  }).join(""):`<div class="sub" style="margin-top:16px;text-align:center">${rcps.length?"검색 결과가 없어요.":"아직 기록이 없어요."}</div>`;
 }
-function tg(k){const s=render.o;s.has(k)?s.delete(k):s.add(k);render()}
+function tg(n){const s=render.o,k=render.gl[n];s.has(k)?s.delete(k):s.add(k);render()}
 
 function rowHtml(r={}){
-  return `<div class="row"><input class="n" list="dn" placeholder="품목" value="${esc(r.name||"")}" oninput="hint(this)"><input class="u" placeholder="수량" value="${esc(r.qty||"")}"><input class="p" type="number" inputmode="numeric" placeholder="판매가" value="${r.price||""}"><select class="r"><option value="">자동</option><option ${r.rate==5?"selected":""} value="5">5%</option><option ${r.rate==10?"selected":""} value="10">10%</option></select><div class="sub k" style="grid-column:1/-1"></div></div>`;
+  return `<div class="row"${r.grp?` data-grp="${esc(r.grp)}"`:""}><input class="n" list="dn" placeholder="품목" value="${esc(r.name||"")}" oninput="hint(this)"><input class="u" placeholder="수량" value="${esc(r.qty||"")}"><input class="p" type="number" inputmode="numeric" placeholder="판매가" value="${r.price||""}"><select class="r"><option value="">자동</option><option value="5"${r.rate==5?" selected":""}>5%</option><option value="10"${r.rate==10?" selected":""}>10%</option></select><div class="sub k" style="grid-column:1/-1"></div></div>`;
 }
 function hint(el){
-  const k=known(el.value),box=el.parentNode.querySelector(".k");
-  box.textContent=k!=null?`기록된 할인율 ${k}% 자동 적용`:"";
+  const row=el.parentNode;delete row.dataset.grp;
+  const g=exactGrp(el.value),r=g!=null?grMap(editId)[g]:null;
+  row.querySelector(".k").textContent=r!=null?`기록된 할인율 ${r}% 자동 적용`:"";
 }
 function openForm(r){
-  const e=r||{};editId=r?r.id:null;cand=[];
-  $("#form").innerHTML=`<div class="card"><h3>${r?"기록 수정":"영수증 기록"}</h3>
-  <div class="f"><input id="fd" type="date" value="${e.date||today()}"><input id="fs" list="ds" placeholder="구매처" value="${esc(e.store||"")}"></div>
-  <div id="rows">${rowHtml(e.name?e:{})}</div>
-  ${r?"":`<button class="l" onclick="$('#rows').insertAdjacentHTML('beforeend',rowHtml())">+ 품목 추가</button>
-  <div class="f"><input id="tot" type="number" inputmode="numeric" placeholder="영수증 전체 할인액"><button onclick="solve()">할인율 역산</button></div>`}
+  editId=r?r.id:null;det0=[];
+  $("#form").innerHTML=`<div class="card"><h3>${r?"영수증 수정":"영수증 기록"}</h3>
+  <div class="f"><input id="fd" type="date" value="${r?r.date:today()}"><input id="fs" list="ds" placeholder="구매처" value="${r?esc(r.store):""}"></div>
+  <div id="rows">${r?r.items.map(rowHtml).join(""):rowHtml()}</div>
+  <button class="l" onclick="$('#rows').insertAdjacentHTML('beforeend',rowHtml())">+ 품목 추가</button>
+  <div class="f"><input id="tot" type="number" inputmode="numeric" placeholder="영수증 전체 할인액" value="${r&&r.total!=null?r.total:""}"><button onclick="solve()">할인율 역산</button></div>
   <div id="cd"></div>
-  <div class="f" style="margin-top:10px"><button onclick="closeForm()">취소</button><button class="p" onclick="save()">저장</button></div></div>`;
-  $("#bar").innerHTML="";document.querySelectorAll("#rows .n").forEach(hint);$("#form").scrollIntoView();
+  <div class="f" style="margin-top:10px"><button onclick="closeForm()">취소</button>${r?`<button onclick="delR()">삭제</button>`:""}<button class="p" onclick="save()">저장</button></div></div>`;
+  $("#bar").innerHTML="";document.querySelectorAll("#rows .row").forEach(el=>{const k=el.querySelector(".k"),n=el.querySelector(".n").value;if(n){const g=exactGrp(n),x=g!=null?grMap(editId)[g]:null;k.textContent=x!=null?`기록된 할인율 ${x}% 자동 적용`:""}});$("#form").scrollIntoView();
 }
 function closeForm(){$("#form").innerHTML="";editId=null;render()}
 function readRows(){
-  return [...document.querySelectorAll("#rows .row")].map(el=>({el,name:el.querySelector(".n").value.trim(),qty:el.querySelector(".u").value.trim(),price:+el.querySelector(".p").value,sel:el.querySelector(".r").value})).filter(r=>r.name||r.price);
+  return [...document.querySelectorAll("#rows .row")].map(el=>{const name=el.querySelector(".n").value.trim();return{el,name,qty:el.querySelector(".u").value.trim(),price:+el.querySelector(".p").value,sel:el.querySelector(".r").value,grp:el.dataset.grp||exactGrp(name)||key(name)}}).filter(r=>r.name||r.price);
 }
-function rateOf(r){return r.sel?+r.sel:known(r.name)}
+function askQ(cb){
+  const R=readRows().filter(r=>r.name&&r.price),gs=[...new Set(flat().map(i=>i.grp))],fl=flat();
+  Q=[];pend=cb;
+  R.forEach(r=>{
+    if(r.el.dataset.grp)return;
+    const ex=exactGrp(r.name);if(ex){r.el.dataset.grp=ex;return}
+    const t=toks(r.name),g=t.length&&gs.find(g=>fl.some(i=>i.grp===g&&ov(t,toks(i.name))));
+    g?Q.push({r,g}):r.el.dataset.grp=key(r.name);
+  });
+  if(!Q.length)return false;
+  $("#cd").innerHTML=Q.map((q,i)=>`<div class="card" id="q${i}" style="border:2px solid var(--ac)"><div><b>${esc(q.r.name)}</b>이(가) 기존 <b>${esc(gname(q.g))}</b>과(와) 같은 품목인가요?</div><div class="f"><button onclick="ans(${i},1)">맞아요</button><button onclick="ans(${i},0)">아니에요</button></div></div>`).join("");
+  return true;
+}
+function ans(i,y){const q=Q[i];q.r.el.dataset.grp=y?q.g:key(q.r.name);q.done=1;$("#q"+i).remove();if(Q.every(x=>x.done)){$("#cd").innerHTML="";pend()}}
 function solve(){
+  if(askQ(solve))return;
   const tot=+$("#tot").value,R=readRows().filter(r=>r.name&&r.price);
   if(!tot||!R.length){$("#cd").innerHTML=`<div class="warn">품목 판매가와 전체 할인액을 먼저 입력하세요.</div>`;return}
-  let fixed=0;const U=[];
-  R.forEach(r=>{const x=rateOf(r);x!=null?fixed+=r10(r.price*x/100):U.push(r)});
-  if(U.length>18){$("#cd").innerHTML=`<div class="warn">할인율을 모르는 품목이 너무 많아요. 일부는 직접 선택해 주세요.</div>`;return}
-  const res=[];
-  for(let m=0;m<(1<<U.length);m++){
-    let s=fixed;U.forEach((r,i)=>s+=r10(r.price*((m>>i&1)?10:5)/100));
-    if(Math.abs(s-tot)<=10)res.push({m,d:Math.abs(s-tot)});
-  }
-  res.sort((a,b)=>a.d-b.d);cand=res.slice(0,3).map(c=>U.map((r,i)=>[r,(c.m>>i&1)?10:5]));
-  $("#cd").innerHTML=!U.length?`<div class="warn">모든 품목의 할인율이 이미 정해져 있어요.</div>`:
-    res.length?`<div class="sub" style="margin-top:8px">가능한 조합 ${res.length}개${res.length>3?" (상위 3개)":""}. 눌러서 적용하세요.</div>`+cand.map((c,i)=>`<button class="cand" onclick="apply(${i})">${c.map(([r,x])=>esc(r.name)+" "+x+"%").join(", ")}</button>`).join(""):
-    `<div class="warn">맞는 조합이 없어요. 금액이나 품목을 다시 확인하세요.</div>`;
+  const G=grMap(editId);R.forEach(r=>{if(r.sel)G[r.grp]=+r.sel});
+  const recs=rcps.filter(x=>x.id!==editId).map(x=>({date:x.date,total:x.total,items:x.items})).concat([{date:"이번 영수증",total:tot,items:R.map(r=>({price:r.price,grp:r.grp}))}]);
+  const {det,und,bad}=sysSolve(recs,G),mine=new Set(R.map(r=>r.grp));
+  const known=new Set(Object.keys(grMap(editId)).concat(R.filter(r=>r.sel).map(r=>r.grp)));
+  det0=R.filter(r=>r.grp in det&&!known.has(r.grp)).map(r=>[r,det[r.grp]]);
+  const un=R.filter(r=>und.has(r.grp)&&!known.has(r.grp));
+  let h="";
+  if(bad.length)h+=`<div class="warn">이 영수증과 기존 기록이 안 맞아요 (관련: ${[...new Set(bad.map(b=>b.date))].join(", ")}). 할인액이나 품목을 확인하세요. 저장은 가능해요.</div>`;
+  if(det0.length)h+=`<div class="warn" style="background:var(--ok);color:var(--oktx)">확정: ${det0.map(([r,x])=>esc(r.name)+" "+x+"%").join(", ")}</div>`;
+  if(un.length)h+=`<div class="warn">미정: ${un.map(r=>esc(r.name)+" (5 또는 10%)").join(", ")}<br>미확정으로 저장되고, 나중에 확정되면 자동으로 채워져요. 아는 품목은 직접 선택해도 돼요.</div>`;
+  if(!h)h=`<div class="warn">모든 품목의 할인율이 이미 정해져 있어요.</div>`;
+  $("#cd").innerHTML=h+(det0.length?`<button class="cand" onclick="apply()">확정분 적용</button>`:"");
 }
-function apply(i){cand[i].forEach(([r,x])=>r.el.querySelector(".r").value=String(x));msg("적용했어요. 확인 후 저장하세요.")}
+function apply(){det0.forEach(([r,x])=>r.el.querySelector(".r").value=String(x));msg("확정분을 적용했어요.")}
 async function save(){
   try{
-    const date=$("#fd").value,store=$("#fs").value.trim(),R=readRows();
+    if(askQ(save))return;
+    const date=$("#fd").value,store=$("#fs").value.trim(),tot=$("#tot").value?+$("#tot").value:null,R=readRows();
     if(!date||!R.length)return msg("날짜와 품목을 입력하세요.");
-    for(const r of R)if(!r.name||!r.price||rateOf(r)==null)return msg(`"${r.name||"(품목명 없음)"}"의 할인율을 선택하거나 역산하세요.`);
+    for(const r of R)if(!r.name||!r.price)return msg("품목명과 판매가를 입력하세요.");
+    const gr=grMap(editId),its=R.map(r=>({name:r.name,qty:r.qty,price:r.price,grp:r.grp,rate:r.sel?+r.sel:(r.grp in gr?gr[r.grp]:null)}));
     msg("저장 중…");
-    for(const r of R){const o={date,store,name:r.name,qty:r.qty,price:r.price,rate:rateOf(r)};editId?await api("PATCH",editId,enc(o)):await api("POST","",enc(o))}
-    closeForm();await load();msg("저장했어요.");
+    const o={date,store,total:tot,items:its};
+    editId?await api("PATCH",editId,enc(o)):await api("POST","",enc(o));
+    const np=its.filter(i=>i.rate==null).length;
+    closeForm();msg(np?`저장했어요. ${np}건은 미확정이에요.`:"저장했어요.");await load();
   }catch(e){msg("저장 실패: "+e.message)}
 }
-function ed(id){openForm(items.find(i=>i.id===id))}
-async function del(id){if(!confirm("이 기록을 삭제할까요?"))return;try{await api("DELETE",id);await load()}catch(e){msg("삭제 실패: "+e.message)}}
+function ed(id){openForm(rcps.find(r=>r.id===id))}
+async function delR(){if(!confirm("이 영수증을 삭제할까요?"))return;try{await api("DELETE",editId);closeForm();await load()}catch(e){msg("삭제 실패: "+e.message)}}
 
 $("#q").oninput=render;
 $("#lg").onclick=()=>{
